@@ -1,0 +1,31 @@
+{
+  "name": "mamia-server",
+  "version": "1.0.0",
+  "description": "Mami IA — Serveur WebSocket multi-LLM par téléphone",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.0",
+    "@fastify/formbody": "^7.4.0",
+    "@fastify/websocket": "^10.0.0",
+    "dotenv": "^16.4.0",
+    "fastify": "^4.28.0",
+    "openai": "^4.77.0",
+    "twilio": "^5.3.0",
+    "ioredis": "^5.3.2",
+    "pg": "^8.11.0",
+    "bcrypt": "^5.1.1",
+    "jsonwebtoken": "^9.0.2",
+    "@google/generative-ai": "^0.21.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
