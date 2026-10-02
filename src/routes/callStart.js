@@ -87,10 +87,11 @@ export async function callStartRoute(fastify) {
 
     // ── 1. Validation signature Twilio (production) ────────
     if (process.env.NODE_ENV === 'production') {
+const body = req.body && typeof req.body === 'object' ? req.body : {}
       const valid = validateRequest(
         process.env.TWILIO_AUTH_TOKEN,
         `${process.env.APP_URL}/call/start`,
-        req.body,
+body,
         req.headers['x-twilio-signature'] || ''
       )
       if (!valid) {
