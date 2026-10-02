@@ -26,7 +26,7 @@ export async function callStatusRoute(fastify) {
     }, '📊 Statut appel')
 
     // Nettoyer la session si elle existe encore
-    if (callSid) deleteSession(CallSid)
+    if (CallSid) deleteSession(CallSid)
 
     // ── Analytics (à brancher en Phase 2) ─────────────────
     // Exemples de métriques utiles à logger :
