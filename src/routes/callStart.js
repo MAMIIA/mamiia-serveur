@@ -78,9 +78,9 @@ export async function callStartRoute(fastify) {
       const body = (req.body && typeof req.body === 'object') ? { ...req.body } : {}
       const valid = validateRequest(
         process.env.TWILIO_AUTH_TOKEN,
+        req.headers['x-twilio-signature'] || '',
         `${process.env.APP_URL}/call/start`,
-        body,
-        req.headers['x-twilio-signature'] || ''
+        body
       )
       if (!valid) {
         fastify.log.warn({ ip: req.ip }, '🚨 Signature Twilio invalide — webhook spoofing probable')
