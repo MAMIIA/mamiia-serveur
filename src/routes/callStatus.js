@@ -1,40 +1,30 @@
 // ============================================================
-// MAMI IA v2 — POST /call/status
-// Webhook Twilio de fin d'appel.
-// Sans base de données, on logue simplement les métriques.
-// En production, brancher ici un service analytics (Mixpanel, etc.)
+// Mami IA v3.2 — Route POST /call/status
+//
+// Reçoit les callbacks de statut Twilio après raccrochage.
+// Nettoie la session et les compteurs anti-fraude.
 // ============================================================
 
 import { deleteSession } from '../sessions.js'
+import { decrementCallCount, clearRecentCall } from './callStart.js'
+
+const FINAL_STATUSES = ['completed', 'busy', 'no-answer', 'canceled', 'failed']
 
 export async function callStatusRoute(fastify) {
   fastify.post('/call/status', async (req, reply) => {
-    const {
-      CallSid,
-      CallStatus,
-      CallDuration,  // durée en secondes fournie par Twilio
-      From,
-      To
-    } = req.body
+    const { CallSid, CallStatus, From, CallDuration } = req.body || {}
 
-    fastify.log.info({
-      callSid: CallSid,
-      status: CallStatus,
-      duration: `${CallDuration}s`,
-      from: From,
-      to: To
-    }, '📊 Statut appel')
+    fastify.log.info({ CallSid, CallStatus, CallDuration }, '📊 Statut appel')
 
-    // Nettoyer la session si elle existe encore
-    if (CallSid) deleteSession(CallSid)
+    if (CallSid && FINAL_STATUSES.includes(CallStatus)) {
+      deleteSession(CallSid)
+      if (From) {
+        decrementCallCount(From, CallSid)
+        clearRecentCall(From)
+      }
+      fastify.log.info({ CallSid, CallStatus }, '🧹 Session nettoyée')
+    }
 
-    // ── Analytics (à brancher en Phase 2) ─────────────────
-    // Exemples de métriques utiles à logger :
-    // - Durée moyenne par appel
-    // - LLM le plus choisi
-    // - Heure de pointe
-    // → Mixpanel / Amplitude / simple fichier CSV
-
-    reply.send('OK')
+    return reply.code(200).send()
   })
 }
