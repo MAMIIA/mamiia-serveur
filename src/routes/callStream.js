@@ -1,8 +1,8 @@
 // ============================================================
-// MAMI IA v3 — WS /call/stream
+// Mami IA v3.2 — WS /call/stream
 //
-// Plus de menu de choix LLM : l'appelant est connecté
-// directement à Mami dès le début de la conversation.
+// L'appelant est connecté directement à Mami dès le début
+// de la conversation via Twilio ConversationRelay.
 // ============================================================
 
 import {
@@ -11,8 +11,11 @@ import {
 } from '../sessions.js'
 import { streamFromLLM } from '../llm/router.js'
 
-const MAX_MS  = parseInt(process.env.MAX_CALL_DURATION_MINUTES  || '30') * 60 * 1000
-const WARN_MS = (parseInt(process.env.MAX_CALL_DURATION_MINUTES || '30') - parseInt(process.env.WARNING_MINUTES_REMAINING || '5')) * 60 * 1000
+// Fix audit #4 : constantes explicites pour la lisibilité
+const MAX_CALL_DURATION_MINUTES  = parseInt(process.env.MAX_CALL_DURATION_MINUTES  || '30')
+const WARNING_MINUTES_REMAINING  = parseInt(process.env.WARNING_MINUTES_REMAINING  || '5')
+const MAX_MS  = MAX_CALL_DURATION_MINUTES * 60 * 1000
+const WARN_MS = (MAX_CALL_DURATION_MINUTES - WARNING_MINUTES_REMAINING) * 60 * 1000
 
 export async function callStreamRoute(fastify) {
   fastify.get('/call/stream', { websocket: true }, async (socket) => {
