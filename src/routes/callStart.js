@@ -1,5 +1,5 @@
 // ============================================================
-// Mami IA v3.2 — Route POST /call/start  [DIAG-2 : URL + headers]
+// Mami IA v3.2 — Route POST /call/start  [DIAG-3 : AccountSid + token chars]
 // ============================================================
 
 import twilio from 'twilio'
@@ -33,40 +33,49 @@ export async function callStartRoute(fastify) {
 
     const body = req.body
 
-    // ── DIAG-2 : on logue tout ce qui entre dans validateRequest ──
+    // ── DIAG-3 : AccountSid + token fingerprint ──────────────
     const authToken  = process.env.TWILIO_AUTH_TOKEN || ''
     const signature  = req.headers['x-twilio-signature'] || ''
 
-    // URL reconstruite depuis la requête (pas APP_URL)
     const proto      = req.headers['x-forwarded-proto'] || 'https'
     const host       = req.headers['host'] || ''
     const urlFromReq = `${proto}://${host}/call/start`
 
-    // URL depuis APP_URL (comme le code actuel)
     const appUrl     = (process.env.APP_URL || '').replace(/\/$/, '')
     const urlFromEnv = `${appUrl}/call/start`
 
     const validFromReq = validateRequest(authToken, signature, urlFromReq, body)
     const validFromEnv = validateRequest(authToken, signature, urlFromEnv, body)
 
+    // Tester aussi avec TWILIO_ACCOUNT_SID si présent (certaines versions de twilio-node l'utilisent)
+    const accountSidFromBody = body?.AccountSid || 'ABSENT'
+    const accountSidFromEnv  = process.env.TWILIO_ACCOUNT_SID || 'NON_DEFINI'
+
     fastify.log.warn({
-      DIAG2:          true,
+      DIAG3:             true,
       urlFromReq,
       urlFromEnv,
-      urlsMatch:      urlFromReq === urlFromEnv,
+      urlsMatch:         urlFromReq === urlFromEnv,
       validFromReq,
       validFromEnv,
-      signature:      signature.slice(0, 8) + '...',
-      tokenLength:    authToken.length,
-      proto,
-      host,
-      bodyKeys:       Object.keys(body || {}),
-    }, '🔬 DIAG-2 callStart')
+      // AccountSid comparison — clé du diagnostic
+      accountSidFromBody,
+      accountSidFromEnv,
+      accountSidsMatch:  accountSidFromBody === accountSidFromEnv,
+      // Token fingerprint (jamais le token complet)
+      tokenFirst4:       authToken.slice(0, 4),
+      tokenLast4:        authToken.slice(-4),
+      tokenLength:       authToken.length,
+      tokenHasSpaces:    authToken.includes(' '),
+      tokenHasNewline:   authToken.includes('\n'),
+      // Signature info
+      signatureFirst8:   signature.slice(0, 8) + '...',
+      signatureLength:   signature.length,
+    }, '🔬 DIAG-3 callStart')
     // ─────────────────────────────────────────────────────────
 
     const skipValidation = process.env.TWILIO_SKIP_VALIDATION === 'true'
     if (process.env.NODE_ENV === 'production' && !skipValidation) {
-      // On accepte si l'une OU l'autre URL valide
       const valid = validFromReq || validFromEnv
       if (!valid) {
         fastify.log.warn({ ip: req.ip }, '🚨 Signature Twilio invalide')
@@ -135,4 +144,3 @@ function twimlReject(reason) {
   <Hangup/>
 </Response>`
 }
-
