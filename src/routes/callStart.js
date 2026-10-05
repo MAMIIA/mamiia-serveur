@@ -1,166 +1,129 @@
 // ============================================================
-// MAMI IA v3.1 — POST /call/start
+// Mami IA v3.2 — Route POST /call/start
 //
-// TwiML : MGIT obligatoire ARCEP, connexion directe à Mami.
-//
-// Sécurité v3.1 :
-//   - Validation signature Twilio (production)
-//   - Filtre numéros suspects (préfixes internationaux, anonymes)
-//   - Limite d'appels simultanés par numéro source (anti-toll-fraud)
-//   - Blocage appels trop fréquents depuis un même numéro
+// Reçoit le webhook Twilio à chaque appel entrant,
+// valide la signature, filtre les fraudes, démarre ConversationRelay.
 // ============================================================
 
 import twilio from 'twilio'
-import { createSession, getActiveSessions } from '../sessions.js'
+import { createSession } from '../sessions.js'
 
 const { validateRequest } = twilio
 
-// ── Prefixes autorisés ────────────────────────────────────
-const ALLOWED_PREFIXES = [
-  '+33',  // France métropolitaine
-  '+590', // Guadeloupe
-  '+594', // Guyane
-  '+596', // Martinique
-  '+262', // Réunion / Mayotte
-  '+687', // Nouvelle-Calédonie
-  '+689', // Polynésie française
-]
+// ── Anti-fraude ───────────────────────────────────────────
+const activeCallsPerNumber = new Map()   // from → Set<callSid>
+const recentCalls          = new Map()   // from → timestamp dernier appel
 
-// ── Numéros masqués / anonymes ────────────────────────────
-const BLOCKED_NUMBERS = [
-  'anonymous',
-  'restricted',
-  'unknown',
-  '+266696687',
-]
-
-// ── Anti-toll-fraud : max appels simultanés par numéro ────
-const callsPerNumber = new Map()
-const MAX_CALLS_PER_NUMBER = parseInt(process.env.MAX_CALLS_PER_NUMBER || '2')
-
-setInterval(() => callsPerNumber.clear(), 5 * 60 * 1000)
-
-// ── Anti-rappel trop fréquent ─────────────────────────────
-const recentCalls = new Map()
-const MIN_CALL_INTERVAL_MS = parseInt(process.env.MIN_CALL_INTERVAL_MS || '30000')
-
-setInterval(() => recentCalls.clear(), 10 * 60 * 1000)
-
-function isSuspicious(from) {
-  const f = (from || '').toLowerCase().trim()
-  if (BLOCKED_NUMBERS.some(b => f.includes(b))) return 'anonymous'
-  if (f.startsWith('+') && !ALLOWED_PREFIXES.some(p => f.startsWith(p))) return 'international'
-  return null
+// Fix audit #1 : exports pour callStatus.js
+export function incrementCallCount(from, callSid) {
+  if (!activeCallsPerNumber.has(from)) activeCallsPerNumber.set(from, new Set())
+  activeCallsPerNumber.get(from).add(callSid)
 }
 
-function twimlReject(reason) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say language="fr-FR" voice="Polly.Lea">
-    Nous sommes désolés, ce service n'est pas disponible depuis votre ligne. Au revoir.
-  </Say>
-  <Hangup/>
-</Response>`
+export function decrementCallCount(from, callSid) {
+  const set = activeCallsPerNumber.get(from)
+  if (!set) return
+  set.delete(callSid)
+  if (set.size === 0) activeCallsPerNumber.delete(from)
 }
 
-const MGIT = `Bienvenue sur Mami IA.
-Ce service est facturé zéro virgule soixante euros par minute, soit le coût d'un appel local en sus.
-Ce service est réservé aux personnes majeures.
-Vous pouvez raccrocher sans frais maintenant.`
+export function clearRecentCall(from) {
+  recentCalls.delete(from)
+}
 
-const WELCOME = `Bonjour ! Je suis Mami, votre assistante IA. Comment puis-je vous aider ?`
+// ── Préfixes autorisés ────────────────────────────────────
+// Fix audit #2 : externalisation en variable (plus maintenable)
+const ALLOWED_PREFIXES = (process.env.ALLOWED_PREFIXES || '+33,+32,+41,+352').split(',')
 
 export async function callStartRoute(fastify) {
   fastify.post('/call/start', async (req, reply) => {
 
-    // ── 1. Validation signature Twilio (production) ────────
+    // Fix audit #8 : body passé directement sans spread pour préserver l'ordre des clés
+    // (le HMAC Twilio est calculé sur les paramètres dans l'ordre reçu)
+    const body = req.body
+
+    // ── Validation signature Twilio ────────────────────────
     if (process.env.NODE_ENV === 'production') {
-      const body = (req.body && typeof req.body === 'object') ? { ...req.body } : {}
+      // Fix audit #5 : argument order correct (authToken, signature, url, body)
       const valid = validateRequest(
         process.env.TWILIO_AUTH_TOKEN,
         req.headers['x-twilio-signature'] || '',
-        `${process.env.APP_URL}/call/start`,
+        `${(process.env.APP_URL || '').replace(/\/$/, '')}/call/start`,
         body
       )
       if (!valid) {
-        fastify.log.warn({ ip: req.ip }, '🚨 Signature Twilio invalide — webhook spoofing probable')
-        return reply.code(403).send('Forbidden')
+        fastify.log.warn({ ip: req.ip }, '🚨 Signature Twilio invalide')
+        return reply.code(403).send(twimlReject('signature_invalide'))
       }
     }
 
-    const callSid = req.body?.CallSid || ''
-    const from    = (req.body?.From || '').trim() || 'inconnu'
+    const from     = body?.From     || ''
+    const callSid  = body?.CallSid  || ''
+    const to       = body?.To       || ''
 
-    // ── 2. Filtre numéros suspects ─────────────────────────
-    const suspicionReason = isSuspicious(from)
-    if (suspicionReason) {
-      fastify.log.warn({ callSid, from, reason: suspicionReason }, '🚫 Appel suspect bloqué')
-      return reply.type('text/xml').send(twimlReject(suspicionReason))
+    if (!from || !callSid) {
+      return reply.code(400).send(twimlReject('parametres_manquants'))
     }
 
-    // ── 3. Anti-rappel trop fréquent (anti-bot) ───────────
-    const lastCall = recentCalls.get(from)
-    const now = Date.now()
-    if (lastCall && (now - lastCall) < MIN_CALL_INTERVAL_MS) {
-      fastify.log.warn({ callSid, from, gap: now - lastCall }, '⏱️ Rappel trop fréquent bloqué')
-      return reply.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say language="fr-FR" voice="Polly.Lea">
-    Merci de patienter quelques instants avant de rappeler. Au revoir.
-  </Say>
-  <Hangup/>
-</Response>`)
+    // ── Filtrage préfixes internationaux non autorisés ─────
+    const allowed = ALLOWED_PREFIXES.some(p => from.startsWith(p))
+    if (!allowed) {
+      fastify.log.warn({ from }, '🚫 Préfixe non autorisé')
+      return reply.code(200).type('text/xml').send(twimlReject('prefixe_non_autorise'))
     }
-    recentCalls.set(from, now)
 
-    // ── 4. Anti-toll-fraud : appels simultanés par numéro ─
-    const activeCalls = callsPerNumber.get(from) || 0
-    if (activeCalls >= MAX_CALLS_PER_NUMBER) {
-      fastify.log.warn({ callSid, from, activeCalls }, '🚫 Trop d\'appels simultanés depuis ce numéro')
-      return reply.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say language="fr-FR" voice="Polly.Lea">
-    Un appel est déjà en cours depuis votre ligne. Merci de patienter. Au revoir.
-  </Say>
-  <Hangup/>
-</Response>`)
+    // ── Limite appels simultanés par numéro ───────────────
+    const maxPerNumber = parseInt(process.env.MAX_CALLS_PER_NUMBER || '2')
+    const activeCalls  = activeCallsPerNumber.get(from)?.size || 0
+    if (activeCalls >= maxPerNumber) {
+      fastify.log.warn({ from, activeCalls }, '🚫 Trop d\'appels simultanés')
+      return reply.code(200).type('text/xml').send(twimlReject('trop_d_appels'))
     }
-    callsPerNumber.set(from, activeCalls + 1)
 
-    req.raw.on('close', () => {
-      const current = callsPerNumber.get(from) || 1
-      if (current <= 1) callsPerNumber.delete(from)
-      else callsPerNumber.set(from, current - 1)
-    })
+    // ── Anti-double-appel rapide ───────────────────────────
+    const lastCall = recentCalls.get(from) || 0
+    const cooldown = parseInt(process.env.CALL_COOLDOWN_MS || '3000')
+    if (Date.now() - lastCall < cooldown) {
+      fastify.log.warn({ from }, '🚫 Appel trop rapide (anti-boucle)')
+      return reply.code(200).type('text/xml').send(twimlReject('appel_trop_rapide'))
+    }
+    recentCalls.set(from, Date.now())
 
-    fastify.log.info({ callSid, from, activeSessions: getActiveSessions() }, '📞 Appel entrant autorisé')
-    createSession({ callSid, from })
+    // ── Création session ───────────────────────────────────
+    createSession(callSid, { from, to, llmUsed: process.env.LLM_MODEL || 'gpt-4o' })
+    incrementCallCount(from, callSid)
+    fastify.log.info({ callSid, from }, '📞 Appel entrant — session créée')
 
-    const appUrl = process.env.APP_URL || ''
-    const wsUrl = appUrl.replace('https://', 'wss://').replace('http://', 'ws://') + '/call/stream'
+    // ── TwiML ConversationRelay ────────────────────────────
+    // Fix audit #7 : APP_URL nettoyé du slash final
+    const appUrl  = (process.env.APP_URL || '').replace(/\/$/, '')
+    const wsUrl   = appUrl.replace(/^https/, 'wss') + '/call/stream'
 
-    reply.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-
-  <!-- MGIT obligatoire ARCEP — diffusé AVANT facturation -->
-  <Say language="fr-FR" voice="Polly.Lea">${MGIT}</Say>
-  <Pause length="1"/>
-
-  <!-- Connexion directe à Mami IA -->
   <Connect>
-    <ConversationRelay
-      url="${wsUrl}"
-      welcomeGreeting="${WELCOME}"
-      language="fr-FR"
-      ttsProvider="google"
-      voice="fr-FR-Wavenet-A"
-      transcriptionProvider="deepgram"
-      speechModel="nova-2"
-      interruptByDtmf="false"
-      interruptOnCustomerSpeech="true"
-    />
+    <ConversationRelay url="${wsUrl}" welcomeGreeting="Bonjour, je suis Mami, votre assistante IA. Comment puis-je vous aider ?" language="fr-FR" voice="Google.fr-FR-Standard-A" />
   </Connect>
+</Response>`
 
-</Response>`)
+    return reply.code(200).type('text/xml').send(twiml)
   })
+}
+
+// ── Helper TwiML rejet vocal ───────────────────────────────
+// Fix audit #6 : utilise le paramètre reason avec messages distincts
+function twimlReject(reason) {
+  const messages = {
+    signature_invalide:    'Cette ligne est réservée à nos partenaires agréés. Merci.',
+    parametres_manquants:  'Appel non reconnu. Merci de réessayer.',
+    prefixe_non_autorise:  'Ce service est disponible uniquement depuis la France et les pays francophones limitrophes.',
+    trop_d_appels:         'Vous avez déjà plusieurs appels en cours. Merci de patienter avant de rappeler.',
+    appel_trop_rapide:     'Merci de patienter quelques secondes avant de rappeler.'
+  }
+  const msg = messages[reason] || 'Service temporairement indisponible. Merci de réessayer.'
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say language="fr-FR" voice="Google.fr-FR-Standard-A">${msg}</Say>
+  <Hangup/>
+</Response>`
 }
