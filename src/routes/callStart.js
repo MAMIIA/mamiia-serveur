@@ -1,11 +1,12 @@
 // ============================================================
-// Mami IA v3.2 — Route POST /call/start  [DIAG-3 : AccountSid + token chars]
+// Mami IA v3.3 — Route POST /call/start  [PRODUCTION]
+//
+// Validation Twilio : HMAC-SHA1 manuel sur le raw body
+// pour contourner les problèmes de tri de clés avec formbody.
 // ============================================================
 
-import twilio from 'twilio'
+import crypto from 'crypto'
 import { createSession } from '../sessions.js'
-
-const { validateRequest } = twilio
 
 const activeCallsPerNumber = new Map()
 const recentCalls          = new Map()
@@ -28,55 +29,50 @@ export function clearRecentCall(from) {
 
 const ALLOWED_PREFIXES = (process.env.ALLOWED_PREFIXES || '+33,+32,+41,+352').split(',')
 
+/**
+ * Validation manuelle de la signature Twilio (HMAC-SHA1)
+ * Twilio signe : URL + params triés alphabétiquement + leurs valeurs
+ * Référence : https://www.twilio.com/docs/usage/webhooks/webhooks-security
+ */
+function validateTwilioSignature(authToken, signature, url, body) {
+  try {
+    // Trier les paramètres alphabétiquement et concaténer clé+valeur
+    const params = Object.keys(body).sort()
+    let s = url
+    for (const key of params) {
+      s += key + (body[key] ?? '')
+    }
+
+    const expected = crypto
+      .createHmac('sha1', authToken)
+      .update(Buffer.from(s, 'utf-8'))
+      .digest('base64')
+
+    // Comparaison en temps constant pour éviter les timing attacks
+    return crypto.timingSafeEqual(
+      Buffer.from(expected),
+      Buffer.from(signature)
+    )
+  } catch {
+    return false
+  }
+}
+
 export async function callStartRoute(fastify) {
   fastify.post('/call/start', async (req, reply) => {
 
     const body = req.body
 
-    // ── DIAG-3 : AccountSid + token fingerprint ──────────────
-    const authToken  = process.env.TWILIO_AUTH_TOKEN || ''
-    const signature  = req.headers['x-twilio-signature'] || ''
-
-    const proto      = req.headers['x-forwarded-proto'] || 'https'
-    const host       = req.headers['host'] || ''
-    const urlFromReq = `${proto}://${host}/call/start`
-
-    const appUrl     = (process.env.APP_URL || '').replace(/\/$/, '')
-    const urlFromEnv = `${appUrl}/call/start`
-
-    const validFromReq = validateRequest(authToken, signature, urlFromReq, body)
-    const validFromEnv = validateRequest(authToken, signature, urlFromEnv, body)
-
-    // Tester aussi avec TWILIO_ACCOUNT_SID si présent (certaines versions de twilio-node l'utilisent)
-    const accountSidFromBody = body?.AccountSid || 'ABSENT'
-    const accountSidFromEnv  = process.env.TWILIO_ACCOUNT_SID || 'NON_DEFINI'
-
-    fastify.log.warn({
-      DIAG3:             true,
-      urlFromReq,
-      urlFromEnv,
-      urlsMatch:         urlFromReq === urlFromEnv,
-      validFromReq,
-      validFromEnv,
-      // AccountSid comparison — clé du diagnostic
-      accountSidFromBody,
-      accountSidFromEnv,
-      accountSidsMatch:  accountSidFromBody === accountSidFromEnv,
-      // Token fingerprint (jamais le token complet)
-      tokenFirst4:       authToken.slice(0, 4),
-      tokenLast4:        authToken.slice(-4),
-      tokenLength:       authToken.length,
-      tokenHasSpaces:    authToken.includes(' '),
-      tokenHasNewline:   authToken.includes('\n'),
-      // Signature info
-      signatureFirst8:   signature.slice(0, 8) + '...',
-      signatureLength:   signature.length,
-    }, '🔬 DIAG-3 callStart')
-    // ─────────────────────────────────────────────────────────
-
     const skipValidation = process.env.TWILIO_SKIP_VALIDATION === 'true'
+
     if (process.env.NODE_ENV === 'production' && !skipValidation) {
-      const valid = validFromReq || validFromEnv
+      const authToken = process.env.TWILIO_AUTH_TOKEN || ''
+      const signature = req.headers['x-twilio-signature'] || ''
+      const appUrl    = (process.env.APP_URL || '').replace(/\/$/, '')
+      const url       = `${appUrl}/call/start`
+
+      const valid = validateTwilioSignature(authToken, signature, url, body)
+
       if (!valid) {
         fastify.log.warn({ ip: req.ip }, '🚨 Signature Twilio invalide')
         return reply.code(403).send(twimlReject('signature_invalide'))
@@ -116,7 +112,8 @@ export async function callStartRoute(fastify) {
     incrementCallCount(from, callSid)
     fastify.log.info({ callSid, from }, '📞 Appel entrant — session créée')
 
-    const wsUrl = appUrl.replace(/^https/, 'wss') + '/call/stream'
+    const appUrl = (process.env.APP_URL || '').replace(/\/$/, '')
+    const wsUrl  = appUrl.replace(/^https/, 'wss') + '/call/stream'
 
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
