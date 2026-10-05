@@ -1,185 +1,117 @@
 // ============================================================
-// MAMI IA — Routes authentification
-// POST /auth/register
-// POST /auth/login
-// POST /auth/refresh
-// GET  /auth/me
+// Mami IA v3.2 — Routes authentification
+//
+// PHASE 3 — Non enregistré dans index.js pour le MVP
+// À activer quand PostgreSQL et JWT seront configurés
 // ============================================================
 
+import { db } from '../db.js'
 import bcrypt from 'bcrypt'
 import jwt from 'jsonwebtoken'
-import { db } from '../db.js'
 
-const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS || '12')
-const JWT_SECRET = process.env.JWT_SECRET
-const ACCESS_EXPIRY = process.env.ACCESS_TOKEN_EXPIRY || '15m'
-const REFRESH_EXPIRY = process.env.REFRESH_TOKEN_EXPIRY || '7d'
-const FREE_MINUTES = 5  // Minutes offertes à l'inscription
-
-function generateTokens(userId) {
-  const accessToken = jwt.sign({ userId, type: 'access' }, JWT_SECRET, { expiresIn: ACCESS_EXPIRY })
-  const refreshToken = jwt.sign({ userId, type: 'refresh' }, JWT_SECRET, { expiresIn: REFRESH_EXPIRY })
-  return { accessToken, refreshToken }
-}
+const SALT_ROUNDS = 12
 
 export async function authRoutes(fastify) {
 
-  // ── POST /auth/register ──────────────────────────────────
+  // ── Inscription ──────────────────────────────────────────
   fastify.post('/auth/register', async (req, reply) => {
-    const { email, phoneNumber, password } = req.body
-
-    if (!email || !phoneNumber || !password) {
-      return reply.code(400).send({ error: 'Email, téléphone et mot de passe requis' })
-    }
-
-    // Validation basique
-    if (password.length < 8) {
-      return reply.code(400).send({ error: 'Mot de passe trop court (8 caractères minimum)' })
-    }
-
-    // Normaliser le numéro (ex: 0612345678 → +33612345678)
-    const normalizedPhone = normalizePhone(phoneNumber)
-    if (!normalizedPhone) {
-      return reply.code(400).send({ error: 'Numéro de téléphone invalide' })
-    }
-
-    try {
-      const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS)
-
-      const result = await db.query(
-        `INSERT INTO users (email, phone_number, password_hash, minutes_balance)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, email, phone_number, minutes_balance, created_at`,
-        [email.toLowerCase(), normalizedPhone, passwordHash, FREE_MINUTES]
-      )
-
-      const user = result.rows[0]
-      const tokens = generateTokens(user.id)
-
-      // TODO: envoyer OTP SMS pour vérification du numéro (Phase 3)
-
-      return reply.code(201).send({
-        message: `Bienvenue sur Mami IA ! Vous avez ${FREE_MINUTES} minutes offertes.`,
-        user: {
-          id: user.id,
-          email: user.email,
-          phoneNumber: user.phone_number,
-          minutesBalance: user.minutes_balance
-        },
-        ...tokens
-      })
-
-    } catch (err) {
-      if (err.code === '23505') {  // Violation contrainte unique
-        if (err.constraint?.includes('email')) {
-          return reply.code(409).send({ error: 'Cet email est déjà utilisé' })
-        }
-        if (err.constraint?.includes('phone')) {
-          return reply.code(409).send({ error: 'Ce numéro de téléphone est déjà utilisé' })
-        }
-      }
-      fastify.log.error(err)
-      return reply.code(500).send({ error: 'Erreur serveur' })
-    }
-  })
-
-  // ── POST /auth/login ─────────────────────────────────────
-  fastify.post('/auth/login', async (req, reply) => {
-    const { email, password } = req.body
+    const { email, password } = req.body || {}
 
     if (!email || !password) {
       return reply.code(400).send({ error: 'Email et mot de passe requis' })
     }
 
-    const result = await db.query(
-      'SELECT * FROM users WHERE email = $1',
-      [email.toLowerCase()]
-    )
-
-    const user = result.rows[0]
-
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-      return reply.code(401).send({ error: 'Identifiants incorrects' })
+    if (password.length < 8) {
+      return reply.code(400).send({ error: 'Le mot de passe doit contenir au moins 8 caractères' })
     }
-
-    const tokens = generateTokens(user.id)
-
-    return reply.send({
-      user: {
-        id: user.id,
-        email: user.email,
-        phoneNumber: user.phone_number,
-        minutesBalance: user.minutes_balance,
-        plan: user.plan
-      },
-      ...tokens
-    })
-  })
-
-  // ── POST /auth/refresh ───────────────────────────────────
-  fastify.post('/auth/refresh', async (req, reply) => {
-    const { refreshToken } = req.body
-    if (!refreshToken) return reply.code(400).send({ error: 'Refresh token requis' })
 
     try {
-      const payload = jwt.verify(refreshToken, JWT_SECRET)
-      if (payload.type !== 'refresh') throw new Error('Token invalide')
+      const hash = await bcrypt.hash(password, SALT_ROUNDS)
+      const result = await db.query(
+        'INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email',
+        [email.toLowerCase().trim(), hash]
+      )
 
-      const tokens = generateTokens(payload.userId)
-      return reply.send(tokens)
-    } catch {
-      return reply.code(401).send({ error: 'Refresh token invalide ou expiré' })
+      const user = result.rows[0]
+      const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: '30d' })
+
+      return reply.code(201).send({ token, user: { id: user.id, email: user.email } })
+
+    } catch (err) {
+      // Fix audit #8 : regex sur le nom de contrainte PostgreSQL (plus robuste que .includes)
+      // Le nom de contrainte standard pour UNIQUE sur email est "users_email_key"
+      if (err.constraint && /users_email_key/.test(err.constraint)) {
+        return reply.code(409).send({ error: 'Cet email est déjà utilisé' })
+      }
+      fastify.log.error({ err }, '❌ Erreur inscription')
+      return reply.code(500).send({ error: 'Erreur serveur' })
     }
   })
 
-  // ── GET /auth/me ─────────────────────────────────────────
-  fastify.get('/auth/me', { preHandler: requireAuth }, async (req, reply) => {
-    const result = await db.query(
-      'SELECT id, email, phone_number, minutes_balance, plan, created_at FROM users WHERE id = $1',
-      [req.userId]
-    )
-    const user = result.rows[0]
-    if (!user) return reply.code(404).send({ error: 'Utilisateur introuvable' })
+  // ── Connexion ────────────────────────────────────────────
+  fastify.post('/auth/login', async (req, reply) => {
+    const { email, password } = req.body || {}
 
-    return reply.send({
-      id: user.id,
-      email: user.email,
-      phoneNumber: user.phone_number,
-      minutesBalance: user.minutes_balance,
-      plan: user.plan,
-      createdAt: user.created_at
-    })
+    if (!email || !password) {
+      return reply.code(400).send({ error: 'Email et mot de passe requis' })
+    }
+
+    try {
+      const result = await db.query(
+        'SELECT id, email, password_hash FROM users WHERE email = $1',
+        [email.toLowerCase().trim()]
+      )
+
+      const user = result.rows[0]
+      if (!user) {
+        return reply.code(401).send({ error: 'Email ou mot de passe incorrect' })
+      }
+
+      const valid = await bcrypt.compare(password, user.password_hash)
+      if (!valid) {
+        return reply.code(401).send({ error: 'Email ou mot de passe incorrect' })
+      }
+
+      const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: '30d' })
+
+      return reply.send({ token, user: { id: user.id, email: user.email } })
+
+    } catch (err) {
+      fastify.log.error({ err }, '❌ Erreur connexion')
+      return reply.code(500).send({ error: 'Erreur serveur' })
+    }
+  })
+
+  // ── Vérification token (middleware optionnel) ────────────
+  fastify.get('/auth/me', {
+    preHandler: async (req, reply) => {
+      const auth = req.headers.authorization
+      if (!auth?.startsWith('Bearer ')) {
+        return reply.code(401).send({ error: 'Token manquant' })
+      }
+      try {
+        req.user = jwt.verify(auth.slice(7), process.env.JWT_SECRET)
+      } catch {
+        return reply.code(401).send({ error: 'Token invalide ou expiré' })
+      }
+    }
+  }, async (req, reply) => {
+    try {
+      const result = await db.query(
+        'SELECT id, email, created_at FROM users WHERE id = $1',
+        [req.user.userId]
+      )
+      const user = result.rows[0]
+      if (!user) return reply.code(404).send({ error: 'Utilisateur non trouvé' })
+      return reply.send({ user })
+    } catch (err) {
+      fastify.log.error({ err }, '❌ Erreur /auth/me')
+      return reply.code(500).send({ error: 'Erreur serveur' })
+    }
   })
 }
 
-// ── Middleware d'authentification ──────────────────────────
-export async function requireAuth(req, reply) {
-  const authHeader = req.headers.authorization
-  if (!authHeader?.startsWith('Bearer ')) {
-    return reply.code(401).send({ error: 'Token manquant' })
-  }
+// TODO (GitHub issue à créer) : ajouter refresh token, route /auth/logout,
+// et blacklist JWT côté serveur pour la révocation immédiate.
+// À implémenter en Phase 3 avec Redis ou table tokens_revoked en DB.
 
-  try {
-    const token = authHeader.slice(7)
-    const payload = jwt.verify(token, process.env.JWT_SECRET)
-    if (payload.type !== 'access') throw new Error()
-    req.userId = payload.userId
-  } catch {
-    return reply.code(401).send({ error: 'Token invalide ou expiré' })
-  }
-}
-
-// ── Helper normalisation numéro FR ────────────────────────
-function normalizePhone(phone) {
-  const cleaned = phone.replace(/[\s\-\.]/g, '')
-
-  // Déjà au format international
-  if (/^\+\d{10,15}$/.test(cleaned)) return cleaned
-
-  // Format français 06/07/09 → +336/+337/+339
-  if (/^0[1-9]\d{8}$/.test(cleaned)) {
-    return '+33' + cleaned.slice(1)
-  }
-
-  return null
-}
