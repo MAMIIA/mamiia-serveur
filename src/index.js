@@ -1,14 +1,14 @@
 // ============================================================
-// MAMI IA v3.1 — Main server entry point
+// Mami IA v3.2 — Point d'entrée principal du serveur
 //
-// Model: Audiotel SVA — operator handles billing.
-// This server does one thing: orchestrate voice and LLMs.
+// Modèle : Audiotel SVA — facturation opérateur.
+// Ce serveur fait une seule chose : orchestrer la voix et le LLM.
 //
-// Security v3.1:
+// Sécurité v3.2 :
 //   - Rate limiter @fastify/rate-limit (anti-DDoS, anti-webhook-spoofing)
-//   - Twilio signature validation in production
-//   - Suspicious number blocking (unauthorized international prefixes)
-//   - Concurrent call limit per source number
+//   - Validation signature Twilio en production
+//   - Blocage numéros suspects (préfixes internationaux non autorisés)
+//   - Limite d'appels simultanés par numéro source
 // ============================================================
 
 import 'dotenv/config'
@@ -30,16 +30,16 @@ const app = Fastify({
       ? { target: 'pino-pretty', options: { colorize: true } }
       : undefined
   },
-  trustProxy: true  // Railway is behind a reverse proxy
+  trustProxy: true  // Railway est derrière un reverse proxy
 })
 
-// ── Plugins ──────────────────────────────────────────────────
+// ── Plugins ───────────────────────────────────────────────────
 await app.register(fastifyFormbody)
 await app.register(fastifyWebsocket)
 
-// ── Global rate limiter — anti-DDoS and anti-webhook-spoofing
-// Twilio never sends more than a few requests per second per number.
-// A flood = attack. Block at 60 req/min per IP.
+// ── Rate limiter global — anti-DDoS et anti-webhook-spoofing ──
+// Twilio n'envoie jamais plus de quelques requêtes/seconde par numéro.
+// Un flood = attaque. Blocage à 60 req/min par IP.
 await app.register(fastifyRateLimit, {
   global: true,
   max: 60,
@@ -51,20 +51,16 @@ await app.register(fastifyRateLimit, {
     message: 'Rate limit exceeded'
   }),
   keyGenerator: (request) => {
-    // Key by source IP (Railway forwards real IP via x-forwarded-for)
     return request.headers['x-forwarded-for']?.split(',')[0]?.trim()
       || request.socket?.remoteAddress
       || 'unknown'
   },
   onBanHook: (request, key) => {
-    app.log.warn({ key }, '🚨 IP temporarily banned — flood detection')
+    app.log.warn({ key }, '🚨 IP temporairement bannie — flood détecté')
   }
 })
 
-// ── Specific rate limiter for /call/start — stricter ─────────
-// /call/start is the most sensitive endpoint (consumes OpenAI)
-// Twilio will never call more than N times/min from the same IP
-// N = your expected maximum simultaneous calls
+// ── Rate limiter spécifique /call/start — plus strict ────────
 await app.register(async (instance) => {
   await instance.register(fastifyRateLimit, {
     max: parseInt(process.env.MAX_CONCURRENT_CALLS || '50'),
@@ -78,34 +74,34 @@ await app.register(async (instance) => {
   instance.register(callStartRoute)
 })
 
-// ── Normal routes ─────────────────────────────────────────────
+// ── Routes ────────────────────────────────────────────────────
 app.register(callStreamRoute)  // WS /call/stream → ConversationRelay
-app.register(callStatusRoute)  // POST /call/status → logs
+app.register(callStatusRoute)  // POST /call/status → nettoyage + logs
 
 // ── Health check ──────────────────────────────────────────────
 app.get('/health', async () => ({
   status: 'ok',
   service: 'Mami IA',
-  version: '3.1.0',
+  version: '3.2.0',
   uptime: Math.floor(process.uptime()),
   timestamp: new Date().toISOString(),
   environment: process.env.NODE_ENV || 'development'
 }))
 
-// ── Global uncaught error handler ────────────────────────────
+// ── Gestionnaire d'erreurs global ────────────────────────────
 app.setErrorHandler((err, request, reply) => {
-  app.log.error({ err, url: request.url }, '❌ Uncaught error')
+  app.log.error({ err, url: request.url }, '❌ Erreur non gérée')
   reply.code(err.statusCode || 500).send({
-    error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message
+    error: process.env.NODE_ENV === 'production' ? 'Erreur serveur interne' : err.message
   })
 })
 
 try {
   await app.listen({ port: PORT, host: '0.0.0.0' })
-  app.log.info(`🟢 Mami IA v3.1 started — port ${PORT}`)
-  app.log.info(`📞 Model: Audiotel SVA (operator billing)`)
-  app.log.info(`🛡️ Rate limit: 60 req/min global, ${process.env.MAX_CONCURRENT_CALLS || 50} req/min on /call/start`)
-  app.log.info(`🔐 Twilio signature: ${process.env.NODE_ENV === 'production' ? 'ENABLED' : 'disabled (dev)'}`)
+  app.log.info(`🟢 Mami IA v3.2 démarré — port ${PORT}`)
+  app.log.info(`📞 Modèle : Audiotel SVA (facturation opérateur)`)
+  app.log.info(`🛡️ Limite de débit : 60 req/min global, ${process.env.MAX_CONCURRENT_CALLS || 50} req/min sur /call/start`)
+  app.log.info(`🔐 Signature Twilio : ${process.env.NODE_ENV === 'production' ? 'ACTIVÉE' : 'désactivée (dev)'}`)
 } catch (err) {
   app.log.error(err)
   process.exit(1)
