@@ -1,8 +1,8 @@
 // ============================================================
-// MAMI IA — Service email via Brevo (ex-Sendinblue)
+// Mami IA v3.2 — Service email via Brevo (ex-Sendinblue)
 // ============================================================
 
-import { db } from './db.js'
+// Fix audit #14 : import db supprimé (inutilisé dans ce fichier)
 
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email'
 
@@ -38,23 +38,17 @@ async function sendEmail({ to, subject, htmlContent, textContent }) {
  * Envoie le récapitulatif d'appel après raccrochage
  */
 export async function sendCallRecap({
-  userId,
+  userEmail,
   durationSeconds,
   llmUsed,
   minutesBilled,
   remainingMinutes
 }) {
-  // Récupérer l'email de l'utilisateur
-  const result = await db.query('SELECT email FROM users WHERE id = $1', [userId])
-  const user = result.rows[0]
-  if (!user) return
+  if (!userEmail) return
 
   const durationFormatted = formatDuration(durationSeconds)
   const llmNames = {
-    claude: 'Claude (Anthropic)',
-    gpt4o: 'ChatGPT (OpenAI)',
-    gemini: 'Gemini (Google)',
-    mistral: 'Mistral AI',
+    'gpt-4o': 'ChatGPT (OpenAI)',
     null: 'Non sélectionné'
   }
   const llmName = llmNames[llmUsed] || llmUsed
@@ -119,28 +113,29 @@ export async function sendCallRecap({
 </body>
 </html>`
 
-  const textContent = `Mami IA — Récapitulatif de votre appel
-  
-Modèle : ${llmName}
-Durée : ${durationFormatted}
-Minutes débitées : ${minutesBilled}
-Solde restant : ${remainingMinutes} minutes
+  // Fix audit #9 : textContent aligné et sans espaces parasites
+  const textContent = [
+    'Mami IA — Récapitulatif de votre appel',
+    '',
+    `Modèle : ${llmName}`,
+    `Durée : ${durationFormatted}`,
+    `Minutes débitées : ${minutesBilled}`,
+    `Solde restant : ${remainingMinutes} minutes`,
+    '',
+    'Rechargez votre solde sur https://mamia.fr/dashboard'
+  ].join('\n')
 
-Rechargez votre solde sur https://mamia.fr/dashboard`
-
-  await sendEmail({ to: user.email, subject, htmlContent, textContent })
+  await sendEmail({ to: userEmail, subject, htmlContent, textContent })
 }
 
 /**
  * Envoie une alerte solde faible
  */
-export async function sendLowBalanceAlert({ userId, remainingMinutes }) {
-  const result = await db.query('SELECT email FROM users WHERE id = $1', [userId])
-  const user = result.rows[0]
-  if (!user) return
+export async function sendLowBalanceAlert({ userEmail, remainingMinutes }) {
+  if (!userEmail) return
 
   await sendEmail({
-    to: user.email,
+    to: userEmail,
     subject: `Mami IA — Solde faible : ${remainingMinutes} minutes restantes`,
     htmlContent: `<p>Bonjour,<br><br>
       Votre solde Mami IA est faible : <strong>${remainingMinutes} minutes</strong> restantes.<br><br>
