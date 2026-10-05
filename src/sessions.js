@@ -1,63 +1,59 @@
 // ============================================================
-// MAMI IA v2 — Sessions en mémoire (Map)
-// Sans compte utilisateur ni facturation côté serveur,
-// une simple Map Node.js suffit pour les sessions actives.
-// Chaque session vit le temps d'un appel (max 30 min).
+// Mami IA v3.2 — Gestion des sessions d'appel (in-memory)
+//
+// Pas de Redis pour le MVP — Map simple, suffisante pour
+// les volumes attendus (Audiotel SVA, mono-instance Railway).
 // ============================================================
 
-// Map callSid → session
 const sessions = new Map()
 
-// ── Structure d'une session ────────────────────────────────
-// {
-//   callSid:     string
-//   from:        string  (numéro appelant)
-//   selectedLLM: string | null
-//   startTime:   number  (timestamp ms)
-//   status:      'waiting_choice' | 'active' | 'ending'
-//   history:     Array<{role: 'user'|'assistant', content: string}>
-// }
-
-export function createSession({ callSid, from }) {
-  const session = {
+/**
+ * Crée une nouvelle session pour un appel entrant
+ */
+export function createSession(callSid, data) {
+  sessions.set(callSid, {
     callSid,
-    from,
-    selectedLLM: null,
-    startTime: Date.now(),
-    status: 'waiting_choice',
-    history: []
-  }
-  sessions.set(callSid, session)
-  return session
+    createdAt: Date.now(),
+    history: [],
+    ...data
+  })
 }
 
+/**
+ * Récupère une session par callSid
+ */
 export function getSession(callSid) {
   return sessions.get(callSid) || null
 }
 
+/**
+ * Met à jour les champs d'une session existante
+ */
 export function updateSession(callSid, updates) {
   const session = sessions.get(callSid)
-  if (!session) return null
-  const updated = { ...session, ...updates }
-  sessions.set(callSid, updated)
-  return updated
+  if (!session) return
+  sessions.set(callSid, { ...session, ...updates })
 }
 
+/**
+ * Ajoute un message à l'historique de conversation
+ */
 export function appendHistory(callSid, role, content) {
   const session = sessions.get(callSid)
   if (!session) return
   session.history.push({ role, content })
-  // Fenêtre glissante : max 30 échanges pour maîtriser les tokens
-  if (session.history.length > 60) {
-    session.history.splice(0, session.history.length - 60)
-  }
 }
 
+/**
+ * Supprime une session (fin d'appel)
+ */
 export function deleteSession(callSid) {
   sessions.delete(callSid)
 }
 
-// Stats utiles pour le monitoring
+/**
+ * Retourne le nombre de sessions actives
+ */
 export function getActiveSessions() {
   return sessions.size
 }
