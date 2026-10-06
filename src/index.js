@@ -1,20 +1,14 @@
 // ============================================================
-// Mami IA v3.2 — Point d'entrée principal du serveur
+// Mami IA v3.5 — Point d'entrée principal du serveur
 //
 // Modèle : Audiotel SVA — facturation opérateur.
-// Ce serveur fait une seule chose : orchestrer la voix et le LLM.
-//
-// Sécurité v3.2 :
-//   - Rate limiter @fastify/rate-limit (anti-DDoS, anti-webhook-spoofing)
-//   - Validation signature Twilio en production
-//   - Blocage numéros suspects (préfixes internationaux non autorisés)
-//   - Limite d'appels simultanés par numéro source
+// v3.5 : formbody retiré — parsing géré dans callStart.js
+//        pour permettre la validation signature Twilio sur raw body.
 // ============================================================
 
 import 'dotenv/config'
 import Fastify from 'fastify'
 import fastifyWebsocket from '@fastify/websocket'
-import fastifyFormbody from '@fastify/formbody'
 import fastifyRateLimit from '@fastify/rate-limit'
 
 import { callStartRoute } from './routes/callStart.js'
@@ -30,16 +24,14 @@ const app = Fastify({
       ? { target: 'pino-pretty', options: { colorize: true } }
       : undefined
   },
-  trustProxy: true  // Railway est derrière un reverse proxy
+  trustProxy: true
 })
 
 // ── Plugins ───────────────────────────────────────────────────
-await app.register(fastifyFormbody)
+// Note : pas de fastifyFormbody ici — callStart.js gère son propre parsing
 await app.register(fastifyWebsocket)
 
-// ── Rate limiter global — anti-DDoS et anti-webhook-spoofing ──
-// Twilio n'envoie jamais plus de quelques requêtes/seconde par numéro.
-// Un flood = attaque. Blocage à 60 req/min par IP.
+// ── Rate limiter global ───────────────────────────────────────
 await app.register(fastifyRateLimit, {
   global: true,
   max: 60,
@@ -60,7 +52,7 @@ await app.register(fastifyRateLimit, {
   }
 })
 
-// ── Rate limiter spécifique /call/start — plus strict ────────
+// ── Rate limiter spécifique /call/start ───────────────────────
 await app.register(async (instance) => {
   await instance.register(fastifyRateLimit, {
     max: parseInt(process.env.MAX_CONCURRENT_CALLS || '50'),
@@ -75,14 +67,14 @@ await app.register(async (instance) => {
 })
 
 // ── Routes ────────────────────────────────────────────────────
-app.register(callStreamRoute)  // WS /call/stream → ConversationRelay
-app.register(callStatusRoute)  // POST /call/status → nettoyage + logs
+app.register(callStreamRoute)
+app.register(callStatusRoute)
 
 // ── Health check ──────────────────────────────────────────────
 app.get('/health', async () => ({
   status: 'ok',
   service: 'Mami IA',
-  version: '3.2.0',
+  version: '3.5.0',
   uptime: Math.floor(process.uptime()),
   timestamp: new Date().toISOString(),
   environment: process.env.NODE_ENV || 'development'
@@ -98,7 +90,7 @@ app.setErrorHandler((err, request, reply) => {
 
 try {
   await app.listen({ port: PORT, host: '0.0.0.0' })
-  app.log.info(`🟢 Mami IA v3.2 démarré — port ${PORT}`)
+  app.log.info(`🟢 Mami IA v3.5 démarré — port ${PORT}`)
   app.log.info(`📞 Modèle : Audiotel SVA (facturation opérateur)`)
   app.log.info(`🛡️ Limite de débit : 60 req/min global, ${process.env.MAX_CONCURRENT_CALLS || 50} req/min sur /call/start`)
   app.log.info(`🔐 Signature Twilio : ${process.env.NODE_ENV === 'production' ? 'ACTIVÉE' : 'désactivée (dev)'}`)
@@ -106,3 +98,4 @@ try {
   app.log.error(err)
   process.exit(1)
 }
+
