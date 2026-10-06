@@ -1,18 +1,19 @@
 // ============================================================
-// Mami IA v3.5 — WS /call/stream  [DIAG]
+// Mami IA v3.5 — WS /call/stream  [FINAL]
 //
-// Version diagnostic : log ALL messages bruts reçus de Twilio
-// pour identifier pourquoi setup/prompt n'arrivent pas.
+// Fix : envoie {"type":"connected"} immédiatement à l'ouverture
+// du WebSocket pour que Twilio ConversationRelay démarre la
+// transcription et envoie le setup event.
 // ============================================================
 
 import {
-  getSession, updateSession, appendHistory,
+  getSession, appendHistory,
   deleteSession, getActiveSessions
 } from '../sessions.js'
 import { streamFromLLM } from '../llm/router.js'
 
-const MAX_CALL_DURATION_MINUTES  = parseInt(process.env.MAX_CALL_DURATION_MINUTES  || '30')
-const WARNING_MINUTES_REMAINING  = parseInt(process.env.WARNING_MINUTES_REMAINING  || '5')
+const MAX_CALL_DURATION_MINUTES = parseInt(process.env.MAX_CALL_DURATION_MINUTES || '30')
+const WARNING_MINUTES_REMAINING = parseInt(process.env.WARNING_MINUTES_REMAINING || '5')
 const MAX_MS  = MAX_CALL_DURATION_MINUTES * 60 * 1000
 const WARN_MS = (MAX_CALL_DURATION_MINUTES - WARNING_MINUTES_REMAINING) * 60 * 1000
 
@@ -25,18 +26,23 @@ export async function callStreamRoute(fastify) {
 
     fastify.log.info(`🔌 WebSocket ouvert — sessions actives : ${getActiveSessions()}`)
 
+    // ── Confirmation de connexion immédiate à Twilio ──────
+    // ConversationRelay attend ce message pour démarrer la transcription
+    try {
+      socket.send(JSON.stringify({ type: 'connected', protocol: 'Call' }))
+      fastify.log.info('📡 connected envoyé à Twilio')
+    } catch (e) {
+      fastify.log.error({ err: e }, '❌ Échec envoi connected')
+    }
+
     socket.on('message', async (raw) => {
-      // ── DIAG : log tous les messages bruts ──────────────
       const rawStr = raw.toString()
-      fastify.log.info({ rawMessage: rawStr.slice(0, 500) }, '📨 Message WebSocket reçu')
+      fastify.log.debug({ rawMessage: rawStr.slice(0, 300) }, '📨 Message WS reçu')
 
       let event
-      try { event = JSON.parse(rawStr) } catch (e) {
-        fastify.log.warn({ parseError: e.message, raw: rawStr.slice(0, 200) }, '⚠️ Message non-JSON reçu')
-        return
-      }
+      try { event = JSON.parse(rawStr) } catch { return }
 
-      fastify.log.info({ eventType: event.type, callSid: event.callSid }, '📋 Event parsé')
+      fastify.log.info({ eventType: event.type }, '📋 Event reçu')
 
       switch (event.type) {
 
@@ -59,15 +65,12 @@ export async function callStreamRoute(fastify) {
         case 'prompt': {
           const session = getSession(callSid)
           if (!session) {
-            fastify.log.warn({ callSid, eventCallSid: event.callSid }, '⚠️ Session introuvable pour prompt')
+            fastify.log.warn({ callSid }, '⚠️ Session introuvable')
             return
           }
 
           const text = (event.voicePrompt || '').trim()
-          if (!text) {
-            fastify.log.warn({ callSid }, '⚠️ voicePrompt vide')
-            return
-          }
+          if (!text) return
 
           fastify.log.info({ callSid, text }, '🗣️  Question')
           await handleQuery(socket, callSid, session, text, fastify)
@@ -87,13 +90,13 @@ export async function callStreamRoute(fastify) {
         }
 
         default: {
-          fastify.log.info({ eventType: event.type, callSid }, '❓ Event inconnu reçu')
+          fastify.log.info({ eventType: event.type, callSid }, '❓ Event inconnu')
         }
       }
     })
 
-    socket.on('close', (code, reason) => {
-      fastify.log.info({ callSid, closeCode: code, closeReason: reason?.toString() }, '🔌 WebSocket fermé')
+    socket.on('close', (code) => {
+      fastify.log.info({ callSid, closeCode: code }, '🔌 WebSocket fermé')
       cleanup()
     })
     socket.on('error', (err) => { fastify.log.error({ callSid, err }); cleanup() })
@@ -133,4 +136,3 @@ async function handleQuery(socket, callSid, session, userText, fastify) {
 function send(socket, text) {
   socket.send(JSON.stringify({ type: 'text', token: text, last: true }))
 }
-
