@@ -1,9 +1,8 @@
 // ============================================================
-// Mami IA v3.5 — WS /call/stream  [FINAL]
+// Mami IA v3.5b — WS /call/stream
 //
-// Fix : envoie {"type":"connected"} immédiatement à l'ouverture
-// du WebSocket pour que Twilio ConversationRelay démarre la
-// transcription et envoie le setup event.
+// Fix : @fastify/websocket expose connection.socket (ws natif)
+// On utilise connection.socket.send() pour envoyer des messages.
 // ============================================================
 
 import {
@@ -18,7 +17,9 @@ const MAX_MS  = MAX_CALL_DURATION_MINUTES * 60 * 1000
 const WARN_MS = (MAX_CALL_DURATION_MINUTES - WARNING_MINUTES_REMAINING) * 60 * 1000
 
 export async function callStreamRoute(fastify) {
-  fastify.get('/call/stream', { websocket: true }, async (socket) => {
+  fastify.get('/call/stream', { websocket: true }, async (connection) => {
+
+    const socket = connection.socket   // ← ws natif
 
     let callSid      = null
     let durationTimer = null
@@ -26,8 +27,7 @@ export async function callStreamRoute(fastify) {
 
     fastify.log.info(`🔌 WebSocket ouvert — sessions actives : ${getActiveSessions()}`)
 
-    // ── Confirmation de connexion immédiate à Twilio ──────
-    // ConversationRelay attend ce message pour démarrer la transcription
+    // ── Confirmation immédiate à Twilio ConversationRelay ─
     try {
       socket.send(JSON.stringify({ type: 'connected', protocol: 'Call' }))
       fastify.log.info('📡 connected envoyé à Twilio')
@@ -136,3 +136,4 @@ async function handleQuery(socket, callSid, session, userText, fastify) {
 function send(socket, text) {
   socket.send(JSON.stringify({ type: 'text', token: text, last: true }))
 }
+
