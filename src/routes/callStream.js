@@ -1,8 +1,9 @@
 // ============================================================
-// Mami IA v3.5b — WS /call/stream
+// Mami IA v3.5c — WS /call/stream
 //
-// Fix : @fastify/websocket expose connection.socket (ws natif)
-// On utilise connection.socket.send() pour envoyer des messages.
+// Fix : suppression du champ "protocol" dans le message
+// "connected" — Twilio ConversationRelay n'attend pas ce champ
+// et retournait un event "error" immédiatement après setup.
 // ============================================================
 
 import {
@@ -19,7 +20,7 @@ const WARN_MS = (MAX_CALL_DURATION_MINUTES - WARNING_MINUTES_REMAINING) * 60 * 1
 export async function callStreamRoute(fastify) {
   fastify.get('/call/stream', { websocket: true }, async (connection) => {
 
-    const socket = connection.socket   // ← ws natif
+    const socket = connection.socket   // ← ws natif (@fastify/websocket)
 
     let callSid      = null
     let durationTimer = null
@@ -27,9 +28,11 @@ export async function callStreamRoute(fastify) {
 
     fastify.log.info(`🔌 WebSocket ouvert — sessions actives : ${getActiveSessions()}`)
 
-    // ── Confirmation immédiate à Twilio ConversationRelay ─
+    // ── Confirmation immédiate à Twilio ConversationRelay ──
+    // Note v3.5c : on supprime "protocol" — ConversationRelay
+    // ne reconnaît pas ce champ et renvoyait un event "error".
     try {
-      socket.send(JSON.stringify({ type: 'connected', protocol: 'Call' }))
+      socket.send(JSON.stringify({ type: 'connected' }))
       fastify.log.info('📡 connected envoyé à Twilio')
     } catch (e) {
       fastify.log.error({ err: e }, '❌ Échec envoi connected')
