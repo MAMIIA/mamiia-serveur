@@ -1,8 +1,12 @@
 // ============================================================
-// Mami IA v3.3 — Route POST /call/start  [PRODUCTION]
+// Mami IA v3.5 — Route POST /call/start
 //
-// Validation Twilio : HMAC-SHA1 manuel sur le raw body
-// pour contourner les problèmes de tri de clés avec formbody.
+// Parsing géré ici directement via addContentTypeParser.
+// @fastify/formbody retiré de index.js — plus de conflit.
+//
+// Validation Twilio : HMAC-SHA1 sur raw body (non décodé)
+// pour que les valeurs URL-encoded soient signées exactement
+// comme Twilio les a envoyées.
 // ============================================================
 
 import crypto from 'crypto'
@@ -30,17 +34,25 @@ export function clearRecentCall(from) {
 const ALLOWED_PREFIXES = (process.env.ALLOWED_PREFIXES || '+33,+32,+41,+352').split(',')
 
 /**
- * Validation manuelle de la signature Twilio (HMAC-SHA1)
- * Twilio signe : URL + params triés alphabétiquement + leurs valeurs
+ * Validation Twilio sur le raw body (avant décodage URL)
+ * Twilio signe la chaîne : URL + params triés + valeurs tels qu'encodés
  * Référence : https://www.twilio.com/docs/usage/webhooks/webhooks-security
  */
-function validateTwilioSignature(authToken, signature, url, body) {
+function validateTwilioRaw(authToken, signature, url, rawBody) {
   try {
-    // Trier les paramètres alphabétiquement et concaténer clé+valeur
-    const params = Object.keys(body).sort()
+    const params = {}
+    for (const pair of rawBody.split('&')) {
+      const idx = pair.indexOf('=')
+      if (idx === -1) continue
+      const key = decodeURIComponent(pair.slice(0, idx).replace(/\+/g, ' '))
+      const val = pair.slice(idx + 1) // valeur NON décodée — telle que Twilio l'a signée
+      params[key] = val
+    }
+
+    const sorted = Object.keys(params).sort()
     let s = url
-    for (const key of params) {
-      s += key + (body[key] ?? '')
+    for (const key of sorted) {
+      s += key + (params[key] ?? '')
     }
 
     const expected = crypto
@@ -48,7 +60,8 @@ function validateTwilioSignature(authToken, signature, url, body) {
       .update(Buffer.from(s, 'utf-8'))
       .digest('base64')
 
-    // Comparaison en temps constant pour éviter les timing attacks
+    if (expected.length !== signature.length) return false
+
     return crypto.timingSafeEqual(
       Buffer.from(expected),
       Buffer.from(signature)
@@ -59,9 +72,31 @@ function validateTwilioSignature(authToken, signature, url, body) {
 }
 
 export async function callStartRoute(fastify) {
+
+  // Parser le raw body nous-mêmes — @fastify/formbody retiré de index.js
+  fastify.addContentTypeParser(
+    'application/x-www-form-urlencoded',
+    { parseAs: 'string' },
+    (req, body, done) => {
+      req.rawBody = body
+
+      // Parser aussi pour que req.body soit disponible normalement
+      const parsed = {}
+      for (const pair of body.split('&')) {
+        const idx = pair.indexOf('=')
+        if (idx === -1) continue
+        const key   = decodeURIComponent(pair.slice(0, idx).replace(/\+/g, ' '))
+        const value = decodeURIComponent(pair.slice(idx + 1).replace(/\+/g, ' '))
+        parsed[key] = value
+      }
+      done(null, parsed)
+    }
+  )
+
   fastify.post('/call/start', async (req, reply) => {
 
-    const body = req.body
+    const body    = req.body    || {}
+    const rawBody = req.rawBody || ''
 
     const skipValidation = process.env.TWILIO_SKIP_VALIDATION === 'true'
 
@@ -71,7 +106,9 @@ export async function callStartRoute(fastify) {
       const appUrl    = (process.env.APP_URL || '').replace(/\/$/, '')
       const url       = `${appUrl}/call/start`
 
-      const valid = validateTwilioSignature(authToken, signature, url, body)
+      fastify.log.debug({ url, signatureLen: signature.length, rawBodyLen: rawBody.length }, '🔐 Validation Twilio')
+
+      const valid = validateTwilioRaw(authToken, signature, url, rawBody)
 
       if (!valid) {
         fastify.log.warn({ ip: req.ip }, '🚨 Signature Twilio invalide')
@@ -79,11 +116,12 @@ export async function callStartRoute(fastify) {
       }
     }
 
-    const from    = body?.From    || ''
-    const callSid = body?.CallSid || ''
-    const to      = body?.To      || ''
+    const from    = body.From    || ''
+    const callSid = body.CallSid || ''
+    const to      = body.To      || ''
 
     if (!from || !callSid) {
+      fastify.log.warn({ body }, '⚠️ Paramètres manquants')
       return reply.code(400).send(twimlReject('parametres_manquants'))
     }
 
@@ -141,3 +179,4 @@ function twimlReject(reason) {
   <Hangup/>
 </Response>`
 }
+
